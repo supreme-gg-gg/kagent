@@ -218,7 +218,7 @@ def test_e2e_ssl_error_troubleshooting_message(temp_cert_file):
 
 def test_e2e_openai_client_reads_config_based_tls(temp_cert_file):
     """Test OpenAI client reads TLS config from instance fields (agent config)."""
-    with mock.patch("kagent.adk.models._openai.create_ssl_context") as mock_create_ssl:
+    with mock.patch("kagent.adk.models._transport.create_ssl_context") as mock_create_ssl:
         with mock.patch("httpx.AsyncClient") as mock_httpx:
             with mock.patch("kagent.adk.models._openai.AsyncOpenAI"):
                 mock_create_ssl.return_value = mock.MagicMock(spec=ssl.SSLContext)
@@ -316,7 +316,7 @@ def test_e2e_structured_logging_at_startup(temp_cert_file, caplog):
 
 def test_e2e_litellm_with_tls(temp_cert_file):
     """Test complete flow: LiteLLM base URL + TLS configuration."""
-    with mock.patch("kagent.adk.models._openai.create_ssl_context") as mock_create_ssl:
+    with mock.patch("kagent.adk.models._transport.create_ssl_context") as mock_create_ssl:
         with mock.patch("kagent.adk.models._openai.DefaultAsyncHttpxClient") as mock_httpx:
             with mock.patch("kagent.adk.models._openai.AsyncOpenAI") as mock_openai:
                 mock_ssl_context = mock.MagicMock(spec=ssl.SSLContext)

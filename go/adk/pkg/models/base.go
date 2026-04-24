@@ -47,6 +47,28 @@ func BuildHTTPClient(tc TransportConfig) (*http.Client, error) {
 	return &http.Client{Timeout: timeout, Transport: transport}, nil
 }
 
+// BuildHTTPClientWithoutHeaders creates an http.Client with TLS and timeout
+// configuration only. This is useful when another transport layer, such as
+// Google ADC/OAuth, must wrap the base transport before custom headers are
+// applied.
+func BuildHTTPClientWithoutHeaders(tc TransportConfig) (*http.Client, error) {
+	tc.Headers = nil
+	return BuildHTTPClient(tc)
+}
+
+// WithHeaderTransport wraps base so custom headers are added before the request
+// reaches inner transports. When wrapping an auth transport, this lets the auth
+// transport set Authorization last.
+func WithHeaderTransport(base http.RoundTripper, headers map[string]string) http.RoundTripper {
+	if len(headers) == 0 {
+		return base
+	}
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &headerTransport{base: base, headers: headers}
+}
+
 // BearerTokenKey is the context key for storing the bearer token for API key passthrough
 var BearerTokenKey = &contextKey{}
 

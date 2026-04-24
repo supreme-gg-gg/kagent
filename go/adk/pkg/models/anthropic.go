@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -11,6 +12,9 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/vertex"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/go-logr/logr"
+	"golang.org/x/oauth2/google"
+	googleoption "google.golang.org/api/option"
+	googletransport "google.golang.org/api/transport/http"
 )
 
 // anthropicPassthroughOpts returns a per-request option that sets the Anthropic API key
@@ -92,16 +96,35 @@ func newAnthropicModelFromConfig(config *AnthropicConfig, apiKey string, logger 
 // via Google Cloud Vertex AI using Application Default Credentials (ADC).
 // This is used for the GeminiAnthropic / AnthropicVertexAI provider type.
 func NewAnthropicVertexAIModelWithLogger(ctx context.Context, config *AnthropicConfig, region, projectID string, logger logr.Logger) (*AnthropicModel, error) {
-	opts := []option.RequestOption{
-		vertex.WithGoogleAuth(ctx, region, projectID),
+	creds, err := google.FindDefaultCredentials(ctx, "https://www.googleapis.com/auth/cloud-platform")
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default credentials for Anthropic Vertex AI: %w", err)
 	}
 
-	// Create HTTP client with timeout, custom headers, TLS, and passthrough
-	httpClient, err := BuildHTTPClient(config.TransportConfig)
+	baseClient, err := BuildHTTPClientWithoutHeaders(config.TransportConfig)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to build HTTP client for Anthropic Vertex AI: %w", err)
 	}
-	opts = append(opts, option.WithHTTPClient(httpClient))
+	authTransport, err := googletransport.NewTransport(
+		ctx,
+		baseClient.Transport,
+		googleoption.WithTokenSource(creds.TokenSource),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build authenticated transport for Anthropic Vertex AI: %w", err)
+	}
+	baseClient.Transport = WithHeaderTransport(authTransport, config.Headers)
+
+	opts := []option.RequestOption{
+		vertex.WithCredentials(ctx, region, projectID, creds),
+		// vertex.WithCredentials configures the Vertex base URL and request
+		// rewrite middleware. This client preserves that ADC auth behavior while
+		// using kagent's TLS settings underneath it.
+		option.WithHTTPClient(&http.Client{
+			Timeout:   baseClient.Timeout,
+			Transport: baseClient.Transport,
+		}),
+	}
 
 	client := anthropic.NewClient(opts...)
 	logger.Info("Initialized Anthropic Vertex AI model", "model", config.Model, "region", region, "project", projectID)

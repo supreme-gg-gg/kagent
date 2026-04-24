@@ -4,6 +4,7 @@ from ._embedding import KAgentEmbedding
 from ._ollama import KAgentOllamaLlm
 from ._openai import AzureOpenAI, OpenAI
 from ._sap_ai_core import KAgentSAPAICoreLlm
+from ._vertex import KAgentClaudeVertexLlm, KAgentGeminiVertexLlm
 
 __all__ = [
     "OpenAI",
@@ -13,4 +14,6 @@ __all__ = [
     "KAgentOllamaLlm",
     "KAgentEmbedding",
     "KAgentSAPAICoreLlm",
+    "KAgentGeminiVertexLlm",
+    "KAgentClaudeVertexLlm",
 ]

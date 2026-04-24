@@ -216,7 +216,14 @@ func CreateLLM(ctx context.Context, m adk.Model, log logr.Logger) (adkmodel.LLM,
 		if modelName == "" {
 			modelName = DefaultGeminiModel
 		}
-		return adkgemini.NewModel(ctx, modelName, &genai.ClientConfig{APIKey: apiKey})
+		httpClient, err := models.BuildHTTPClient(transportConfigFromBase(m.BaseModel, nil))
+		if err != nil {
+			return nil, fmt.Errorf("failed to build HTTP client for Gemini: %w", err)
+		}
+		return adkgemini.NewModel(ctx, modelName, &genai.ClientConfig{
+			APIKey:     apiKey,
+			HTTPClient: httpClient,
+		})
 
 	case *adk.GeminiVertexAI:
 		project := os.Getenv("GOOGLE_CLOUD_PROJECT")
@@ -231,11 +238,24 @@ func CreateLLM(ctx context.Context, m adk.Model, log logr.Logger) (adkmodel.LLM,
 		if modelName == "" {
 			modelName = DefaultGeminiModel
 		}
-		return adkgemini.NewModel(ctx, modelName, &genai.ClientConfig{
+		transportConfig := transportConfigFromBase(m.BaseModel, nil)
+		httpClient, err := models.BuildHTTPClientWithoutHeaders(transportConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build HTTP client for Gemini Vertex AI: %w", err)
+		}
+		cfg := &genai.ClientConfig{
 			Backend:  genai.BackendVertexAI,
 			Project:  project,
 			Location: location,
-		})
+			// UseDefaultCredentials wraps this TLS-configured client with
+			// Google ADC/OAuth. Do not pass a bare client to Vertex.
+			HTTPClient: httpClient,
+		}
+		if err := cfg.UseDefaultCredentials(); err != nil {
+			return nil, fmt.Errorf("failed to configure default credentials for Gemini Vertex AI: %w", err)
+		}
+		cfg.HTTPClient.Transport = models.WithHeaderTransport(cfg.HTTPClient.Transport, transportConfig.Headers)
+		return adkgemini.NewModel(ctx, modelName, cfg)
 
 	case *adk.Anthropic:
 		modelName := m.Model
@@ -314,11 +334,12 @@ func CreateLLM(ctx context.Context, m adk.Model, log logr.Logger) (adkmodel.LLM,
 
 	case *adk.SAPAICore:
 		cfg := models.SAPAICoreConfig{
-			Model:         m.Model,
-			BaseUrl:       m.BaseUrl,
-			ResourceGroup: m.ResourceGroup,
-			AuthUrl:       m.AuthUrl,
-			Headers:       extractHeaders(m.Headers),
+			TransportConfig: transportConfigFromBase(m.BaseModel, nil),
+			Model:           m.Model,
+			BaseUrl:         m.BaseUrl,
+			ResourceGroup:   m.ResourceGroup,
+			AuthUrl:         m.AuthUrl,
+			Headers:         extractHeaders(m.Headers),
 		}
 		return models.NewSAPAICoreModelWithLogger(cfg, log)
 

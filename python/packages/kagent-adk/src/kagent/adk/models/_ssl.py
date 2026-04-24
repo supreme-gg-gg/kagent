@@ -4,6 +4,9 @@ import logging
 import ssl
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -243,3 +246,34 @@ def create_ssl_context(
             ) from e
 
     return ctx
+
+class KAgentTLSMixin:
+    """Mixin for model wrappers that accept kagent TLS configuration."""
+
+    tls_disable_verify: Optional[bool] = None
+    tls_ca_cert_path: Optional[str] = None
+    tls_disable_system_cas: Optional[bool] = None
+
+    def _has_tls_config(self) -> bool:
+        return bool(self.tls_disable_verify or self.tls_ca_cert_path or self.tls_disable_system_cas)
+
+    def _tls_verify(self):
+        if not self._has_tls_config():
+            return None
+        return create_ssl_context(
+            disable_verify=self.tls_disable_verify or False,
+            ca_cert_path=self.tls_ca_cert_path,
+            disable_system_cas=self.tls_disable_system_cas or False,
+        )
+
+    def _tls_httpx_kwargs(self) -> dict[str, object]:
+        verify = self._tls_verify()
+        if verify is None:
+            return {}
+        return {"verify": verify}
+
+    def _httpx_async_client_if_tls(self, client_cls=httpx.AsyncClient, **kwargs) -> httpx.AsyncClient | None:
+        tls_kwargs = self._tls_httpx_kwargs()
+        if not tls_kwargs:
+            return None
+        return client_cls(**tls_kwargs, **kwargs)
