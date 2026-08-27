@@ -28,11 +28,17 @@ import (
 	"syscall"
 	"time"
 
+	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
+	remotemcpcontroller "github.com/kagent-dev/kagent/go/core/internal/controller/remotemcpserver"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/grpcserver"
 	authimpl "github.com/kagent-dev/kagent/go/core/internal/httpserver/auth"
 	"github.com/kagent-dev/kagent/go/core/internal/service/kubecrud"
+	modelservice "github.com/kagent-dev/kagent/go/core/internal/service/model"
+	prompttemplateservice "github.com/kagent-dev/kagent/go/core/internal/service/prompttemplate"
+	systemservice "github.com/kagent-dev/kagent/go/core/internal/service/system"
+	toolservice "github.com/kagent-dev/kagent/go/core/internal/service/tool"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"github.com/kagent-dev/kagent/go/core/pkg/migrations"
 	"github.com/kagent-dev/kagent/go/core/v2/a2agateway"
@@ -41,13 +47,17 @@ import (
 	v2controller "github.com/kagent-dev/kagent/go/core/v2/controller"
 	v2mcp "github.com/kagent-dev/kagent/go/core/v2/mcp"
 	"github.com/kagent-dev/kagent/go/core/v2/substrate"
+	kmcp "github.com/kagent-dev/kmcp/api/v1alpha1"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/errgroup"
+	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -91,8 +101,21 @@ func main() {
 	managerScheme := k8sruntime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(managerScheme))
 	utilruntime.Must(kagentv1alpha3.AddToScheme(managerScheme))
+	utilruntime.Must(atev1alpha1.AddToScheme(managerScheme))
+	utilruntime.Must(kmcp.AddToScheme(managerScheme))
+	watchNamespaces := namespaces(os.Getenv("WATCH_NAMESPACES"))
+	managerClientOptions := client.Options{}
+	managerCacheOptions := cache.Options{DefaultNamespaces: namespaceCache(watchNamespaces)}
+	if len(watchNamespaces) > 0 {
+		// A namespaced Role cannot list cluster-scoped Namespace objects. Read them
+		// directly so SystemService can fall back to the configured names on a
+		// Forbidden response without a failing Namespace informer blocking startup.
+		managerClientOptions.Cache = &client.CacheOptions{DisableFor: []client.Object{&corev1.Namespace{}}}
+	}
 	manager, err := ctrl.NewManager(kubeConfig, ctrl.Options{
 		Scheme:                  managerScheme,
+		Cache:                   managerCacheOptions,
+		Client:                  managerClientOptions,
 		Metrics:                 metricsserver.Options{BindAddress: "0"},
 		LeaderElection:          envBool("LEADER_ELECT"),
 		LeaderElectionID:        "0e9f6799.kagent.dev",
@@ -101,7 +124,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("create controller manager: %v", err)
 	}
-	runtime, err := v2controller.NewRuntime(kubeConfig, namespaces(os.Getenv("WATCH_NAMESPACES")), ctx.Done())
+	runtime, err := v2controller.NewRuntime(kubeConfig, watchNamespaces, ctx.Done())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -111,6 +134,11 @@ func main() {
 	}
 	if err := manager.Add(reconciler); err != nil {
 		log.Fatalf("add reconciler to controller manager: %v", err)
+	}
+	mcpClient := toolservice.NewRuntimeMCPClient(manager.GetClient())
+	remoteMCPDiscovery := remotemcpcontroller.New(manager.GetClient(), mcpClient, store)
+	if err := remoteMCPDiscovery.SetupWithManager(manager); err != nil {
+		log.Fatalf("set up RemoteMCPServer discovery: %v", err)
 	}
 
 	actors, err := substrate.Dial(ctx, substrate.Config{
@@ -126,6 +154,11 @@ func main() {
 
 	authenticator := &authimpl.UnsecureAuthenticator{}
 	authorizer := &authimpl.NoopAuthorizer{}
+	resourceNamespace := env("KAGENT_NAMESPACE", "kagent")
+	models := modelservice.NewService(manager.GetClient(), authorizer, resourceNamespace)
+	tools := toolservice.NewService(manager.GetClient(), store, authorizer, resourceNamespace, mcpClient)
+	prompts := prompttemplateservice.NewService(manager.GetClient(), authorizer)
+	system := systemservice.NewService(systemservice.WithInventory(manager.GetClient(), watchNamespaces, authorizer, actors))
 	instanceWorkflow := agentinstance.NewActorWorkflow(store, actors)
 	instances := agentinstance.NewService(store, authorizer, instanceWorkflow)
 	checkpoints := checkpoint.NewService(store, authorizer, actors, instanceWorkflow)
@@ -143,11 +176,15 @@ func main() {
 		log.Fatal(err)
 	}
 	server, err := grpcserver.New(grpcserver.Config{
-		BindAddress:          env("GRPC_BIND_ADDRESS", ":8084"),
-		Reflection:           envBool("GRPC_REFLECTION"),
-		Authenticator:        authenticator,
-		ShareStore:           store,
-		AgentInstanceService: instances,
+		BindAddress:           env("GRPC_BIND_ADDRESS", ":8084"),
+		Reflection:            envBool("GRPC_REFLECTION"),
+		Authenticator:         authenticator,
+		ShareStore:            store,
+		ModelService:          models,
+		ToolService:           tools,
+		PromptTemplateService: prompts,
+		SystemService:         system,
+		AgentInstanceService:  instances,
 		// Both halves of the pair CreateAgentInstance names. Without these two
 		// the only way to author a Harness or an AgentTemplate is kubectl.
 		AgentTemplateService: kubecrud.NewService(manager.GetClient(), authorizer, &kagentv1alpha3.AgentTemplate{}, &kagentv1alpha3.AgentTemplateList{}, "AgentTemplate"),
@@ -212,6 +249,17 @@ func namespaces(value string) []string {
 		if namespace = strings.TrimSpace(namespace); namespace != "" {
 			result = append(result, namespace)
 		}
+	}
+	return result
+}
+
+func namespaceCache(names []string) map[string]cache.Config {
+	if len(names) == 0 {
+		return nil
+	}
+	result := make(map[string]cache.Config, len(names))
+	for _, name := range names {
+		result[name] = cache.Config{}
 	}
 	return result
 }
