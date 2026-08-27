@@ -710,6 +710,29 @@ describe("A2AGrpcChatClient.history", () => {
     ]);
   });
 
+  it("shows the same completed response only once when artifacts repeat it", async () => {
+    // Some runtimes close a streamed reply with another artifact carrying the
+    // complete answer. Artifact ids identify protocol objects, not distinct chat
+    // prose, so replay must apply the same text dedupe between artifacts that it
+    // already applies between history and artifacts.
+    serveTasks([
+      {
+        id: "task-1",
+        contextId: CONVERSATION.id,
+        status: { state: TaskState.COMPLETED, timestamp: { seconds: 1767225600n } },
+        history: [],
+        artifacts: [
+          { artifactId: "a-1", parts: [text("Hello world.")] },
+          { artifactId: "a-2", parts: [text("Hello world.")] },
+        ],
+      },
+    ]);
+
+    const { messages } = await new A2AGrpcChatClient().history(CONVERSATION);
+    expect(messages).toHaveLength(1);
+    expect(textOf(messages[0])).toBe("Hello world.");
+  });
+
   it("follows every page of a long conversation", async () => {
     // A conversation shown with its first page only, saying nothing, is the quiet
     // half-truth this codebase keeps having to undo.
