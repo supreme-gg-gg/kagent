@@ -41,18 +41,28 @@ import (
 	v2controller "github.com/kagent-dev/kagent/go/core/v2/controller"
 	v2mcp "github.com/kagent-dev/kagent/go/core/v2/mcp"
 	"github.com/kagent-dev/kagent/go/core/v2/substrate"
+	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/errgroup"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	logLevel := zapcore.InfoLevel
+	if value := os.Getenv("ZAP_LOG_LEVEL"); value != "" {
+		if err := logLevel.Set(value); err != nil {
+			log.Fatalf("parse ZAP_LOG_LEVEL: %v", err)
+		}
+	}
+	ctrl.SetLogger(zap.New(zap.Level(logLevel)))
 
 	dbURL, err := database.ResolveURL(env("POSTGRES_DATABASE_URL", "postgres://postgres:kagent@kagent-postgresql.kagent.svc.cluster.local:5432/postgres"), os.Getenv("POSTGRES_DATABASE_URL_FILE"))
 	if err != nil {
